@@ -17,6 +17,7 @@ import time
 # fallback cannot mistake a stuck run for a finished one.
 _PRETEND_STREAMING = {"busy", "wedged"}
 _streaming = False
+_ready = False
 
 
 def work_the_plan(message: str) -> None:
@@ -86,7 +87,7 @@ def settle() -> None:
 
 
 def main() -> int:
-    global _streaming
+    global _streaming, _ready
     scenario = sys.argv[1] if len(sys.argv) > 1 else "normal"
 
     while True:
@@ -116,11 +117,14 @@ def main() -> int:
             continue
 
         if ctype == "get_state":
+            _ready = True
             ok("get_state", rid,
                {"isStreaming": _streaming, "sessionId": "fake", "messageCount": 0})
             continue
 
         if ctype == "new_session":
+            if scenario == "readiness" and not _ready:
+                continue
             ok("new_session", rid, {"cancelled": False})
             continue
 

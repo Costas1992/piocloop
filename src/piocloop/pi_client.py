@@ -137,7 +137,17 @@ class PiClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
+    async def start(self, *, readiness_timeout: float = 60.0) -> None:
+        """Start pi and wait until its RPC session is usable.
+
+        ``create_subprocess_exec`` only means that the OS process exists.  Pi
+        still has to load its model catalogue, session and extensions before
+        it starts consuming RPC commands.  Sending ``new_session`` during
+        that window is particularly fragile with persistent sessions: the
+        command can sit unhandled until the caller's deadline expires.  A
+        bounded get_state handshake makes readiness explicit and also gives
+        respawned clients the same startup guarantee as the first client.
+        """
         if self._proc is not None:
             raise PiError("PiClient already started")
         try:
@@ -158,6 +168,12 @@ class PiClient:
             asyncio.create_task(self._read_stdout(), name="pi-stdout"),
             asyncio.create_task(self._read_stderr(), name="pi-stderr"),
         ]
+        try:
+            # Do not let callers race startup with the first session switch.
+            await self.request({"type": "get_state"}, timeout=readiness_timeout)
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self, timeout: float = 5.0) -> None:
         """Shut the process down. Idempotent, and safe to call after a crash."""

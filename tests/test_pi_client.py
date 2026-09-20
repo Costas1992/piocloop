@@ -126,6 +126,12 @@ async def test_new_session_and_abort():
         await collect_until(client, "agent_settled")
 
 
+async def test_start_waits_for_rpc_readiness_before_new_session():
+    """Startup must complete before the first session replacement is sent."""
+    async with PiClient(fake_argv("readiness")) as client:
+        assert await client.new_session() == {"cancelled": False}
+
+
 async def test_concurrent_requests_are_correlated():
     """Interleaved commands must not cross-resolve each other's futures."""
     async with PiClient(fake_argv("normal")) as client:

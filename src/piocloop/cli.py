@@ -101,7 +101,10 @@ def run(
         help="How to answer blocking extension dialogs: cancel|allow|deny",
     ),
     session_dir: Optional[Path] = typer.Option(None, "--session-dir", help="Passed through to pi"),
-    no_session: bool = typer.Option(False, "--no-session", help="Do not persist pi sessions"),
+    no_session: bool = typer.Option(
+        True, "--no-session/--persist-sessions",
+        help="Use an ephemeral pi session (default); --persist-sessions enables session files",
+    ),
     tools: Optional[str] = typer.Option(None, "--tools", help="Comma-separated tool allowlist"),
     exclude_tools: Optional[str] = typer.Option(
         None, "--exclude-tools", help="Comma-separated tool denylist"

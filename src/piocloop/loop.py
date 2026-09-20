@@ -319,7 +319,20 @@ class LoopEngine:
         self._settled.clear()
         self._seen_agent_start = False
 
-        await self.client.new_session()
+        try:
+            await self.client.new_session()
+        except (PiTimeout, PiExited) as exc:
+            # A session-switch timeout is not a recoverable iteration error:
+            # pi can have accepted the switch while losing its response, so
+            # retrying on the same process is unsafe and used to produce the
+            # characteristic three consecutive ``new_session`` failures.
+            # Replace the process, with start() performing a readiness
+            # handshake before the next iteration reaches this point.
+            self.ui.log_line("warn", f"new_session failed; restarting pi: {exc}")
+            if self.respawns >= self.config.max_respawns:
+                raise
+            await self._respawn_client()
+            raise
         self.iteration += 1
         self.iter_start_time = time.monotonic()
         self.ui.log_line("start", f"Iteration {self.iteration}")
