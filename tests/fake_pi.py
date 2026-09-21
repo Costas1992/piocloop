@@ -89,6 +89,8 @@ def settle() -> None:
 def main() -> int:
     global _streaming, _ready
     scenario = sys.argv[1] if len(sys.argv) > 1 else "normal"
+    if scenario == "startup_deaf":
+        print("startup blocked before RPC reader", file=sys.stderr, flush=True)
 
     while True:
         line = sys.stdin.readline()
@@ -105,6 +107,8 @@ def main() -> int:
 
         ctype = cmd.get("type")
         rid = cmd.get("id")
+        if scenario == "startup_deaf" and ctype == "get_state":
+            continue
 
         # A client must never answer fire-and-forget UI methods. If it does,
         # we announce it so the test can fail.

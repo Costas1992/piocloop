@@ -53,11 +53,30 @@ class PiError(RuntimeError):
 
 
 class PiTimeout(PiError):
-    """A command was not answered within its deadline."""
+    """A command was not answered within its deadline.
+
+    ``diagnostics`` is intentionally retained on the exception: startup
+    failures are otherwise particularly hard to distinguish from a dead pipe.
+    """
+
+    def __init__(self, message: str, *, diagnostics: Optional[dict[str, Any]] = None) -> None:
+        self.diagnostics = diagnostics or {}
+        if self.diagnostics:
+            message = f"{message} ({format_diagnostics(self.diagnostics)})"
+        super().__init__(message)
 
 
 class PiExited(PiError):
     """The `pi` process exited while a command was in flight."""
+
+
+def format_diagnostics(diagnostics: dict[str, Any]) -> str:
+    """Compact, safe diagnostics suitable for a UI log line."""
+    keys = ("pid", "returncode", "stdout_bytes", "stdout_frames", "stderr_bytes", "pending", "stdin_closed")
+    parts = [f"{key}={diagnostics[key]}" for key in keys if key in diagnostics]
+    if diagnostics.get("stderr_tail"):
+        parts.append("stderr=" + " | ".join(str(x) for x in diagnostics["stderr_tail"][-3:]))
+    return ", ".join(parts)
 
 
 def build_argv(
@@ -132,6 +151,12 @@ class PiClient:
         self.exited: asyncio.Event = asyncio.Event()
         self.returncode: Optional[int] = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=stderr_tail)
+        self._stdout_bytes = 0
+        self._stdout_frames = 0
+        self._stderr_bytes = 0
+        self._started_at: Optional[float] = None
+        self._first_stdout_at: Optional[float] = None
+        self._first_stderr_at: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -150,6 +175,7 @@ class PiClient:
         """
         if self._proc is not None:
             raise PiError("PiClient already started")
+        self._started_at = asyncio.get_running_loop().time()
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv,
@@ -172,6 +198,8 @@ class PiClient:
             # Do not let callers race startup with the first session switch.
             await self.request({"type": "get_state"}, timeout=readiness_timeout)
         except Exception:
+            # request() attaches a diagnostic snapshot to PiTimeout.  Do not
+            # replace it here: close() clears the live process handle.
             await self.close()
             raise
 
@@ -228,6 +256,9 @@ class PiClient:
                 chunk = await self._proc.stdout.read(65536)
                 if not chunk:
                     break
+                self._stdout_bytes += len(chunk)
+                if self._first_stdout_at is None:
+                    self._first_stdout_at = asyncio.get_running_loop().time()
                 buf.extend(chunk)
                 if len(buf) > _MAX_FRAME_BYTES:
                     raise PiError("RPC frame exceeded maximum size")
@@ -237,6 +268,7 @@ class PiClient:
                         break
                     raw = bytes(buf[:nl])
                     del buf[: nl + 1]
+                    self._stdout_frames += 1
                     self._handle_frame(raw)
         except asyncio.CancelledError:
             raise
@@ -274,6 +306,9 @@ class PiClient:
                 chunk = await self._proc.stderr.read(65536)
                 if not chunk:
                     break
+                self._stderr_bytes += len(chunk)
+                if self._first_stderr_at is None:
+                    self._first_stderr_at = asyncio.get_running_loop().time()
                 for line in chunk.decode("utf-8", errors="replace").splitlines():
                     line = line.rstrip()
                     if line:
@@ -394,13 +429,38 @@ class PiClient:
                 future, timeout=timeout if timeout is not None else self._default_timeout
             )
         except asyncio.TimeoutError as exc:
-            raise PiTimeout(f"no response to {command.get('type')!r} within deadline") from exc
+            diagnostics = self.diagnostics
+            raise PiTimeout(
+                f"no response to {command.get('type')!r} within deadline",
+                diagnostics=diagnostics,
+            ) from exc
         finally:
             self._pending.pop(rid, None)
 
         if not data.get("success", False):
             raise PiError(f"{command.get('type')} failed: {data.get('error', 'unknown error')}")
         return data.get("data") or {}
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        """Snapshot process and wire state without exposing command payloads."""
+        now = asyncio.get_running_loop().time()
+        return {
+            "pid": self._proc.pid if self._proc is not None else None,
+            "returncode": self.returncode if self._proc is None else self._proc.returncode,
+            "age_s": round(now - self._started_at, 3) if self._started_at is not None else None,
+            "first_stdout_s": round(self._first_stdout_at - self._started_at, 3)
+                if self._started_at is not None and self._first_stdout_at is not None else None,
+            "first_stderr_s": round(self._first_stderr_at - self._started_at, 3)
+                if self._started_at is not None and self._first_stderr_at is not None else None,
+            "stdout_bytes": self._stdout_bytes,
+            "stdout_frames": self._stdout_frames,
+            "stderr_bytes": self._stderr_bytes,
+            "stderr_tail": list(self.stderr_tail)[-10:],
+            "pending": len(self._pending),
+            "stdin_closed": self._proc is None or self._proc.stdin is None or self._proc.stdin.is_closing(),
+            "reader_tasks": [not task.done() for task in self._tasks],
+        }
 
     def _resolve(self, msg: dict) -> None:
         rid = msg.get("id")

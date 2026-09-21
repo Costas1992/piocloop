@@ -155,6 +155,9 @@ class LoopEngine:
         except PiError as exc:
             self._set_state(STATE_ERROR)
             self.ui.log_line("error", f"Could not start pi: {exc}")
+            diagnostics = getattr(exc, "diagnostics", {})
+            for line in diagnostics.get("stderr_tail", [])[-5:]:
+                self.ui.log_line("stderr", str(line))
             return False
         self.reload_plan()
         self._set_state(STATE_READY)
@@ -192,6 +195,9 @@ class LoopEngine:
             # the next retry reach _run_iteration with no client.
             self.client = None
             self.ui.log_line("error", f"Could not restart pi: {exc}")
+            diagnostics = getattr(exc, "diagnostics", {})
+            for line in diagnostics.get("stderr_tail", [])[-5:]:
+                self.ui.log_line("stderr", str(line))
             if isinstance(exc, PiError):
                 raise
             raise PiError(f"Could not restart pi: {exc}") from exc

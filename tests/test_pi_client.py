@@ -126,6 +126,18 @@ async def test_new_session_and_abort():
         await collect_until(client, "agent_settled")
 
 
+async def test_startup_timeout_includes_pipe_and_stderr_diagnostics():
+    client = PiClient(fake_argv("startup_deaf"))
+    with pytest.raises(PiTimeout) as caught:
+        await client.start(readiness_timeout=0.1)
+    error = caught.value
+    assert error.diagnostics["pending"] == 1
+    assert error.diagnostics["stdout_bytes"] == 0
+    assert error.diagnostics["stderr_bytes"] > 0
+    assert "startup blocked before RPC reader" in error.diagnostics["stderr_tail"]
+    assert client.exited.is_set()
+
+
 async def test_start_waits_for_rpc_readiness_before_new_session():
     """Startup must complete before the first session replacement is sent."""
     async with PiClient(fake_argv("readiness")) as client:
