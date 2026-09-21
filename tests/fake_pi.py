@@ -18,6 +18,7 @@ import time
 _PRETEND_STREAMING = {"busy", "wedged"}
 _streaming = False
 _ready = False
+_get_state_calls = 0
 
 
 def work_the_plan(message: str) -> None:
@@ -87,7 +88,7 @@ def settle() -> None:
 
 
 def main() -> int:
-    global _streaming, _ready
+    global _streaming, _ready, _get_state_calls
     scenario = sys.argv[1] if len(sys.argv) > 1 else "normal"
     if scenario == "startup_deaf":
         print("startup blocked before RPC reader", file=sys.stderr, flush=True)
@@ -121,6 +122,9 @@ def main() -> int:
             continue
 
         if ctype == "get_state":
+            _get_state_calls += 1
+            if scenario == "readiness_retry" and _get_state_calls == 1:
+                continue
             _ready = True
             ok("get_state", rid,
                {"isStreaming": _streaming, "sessionId": "fake", "messageCount": 0})
@@ -209,6 +213,13 @@ def main() -> int:
             for i in range(4000):
                 sys.stderr.write(f"noisy provider warning line {i}: " + "x" * 120 + "\n")
             sys.stderr.flush()
+            settle()
+
+        elif scenario == "burst":
+            # Large activity burst used to ensure completion is not hidden
+            # behind a slow event consumer.
+            for i in range(9000):
+                out({"type": "message_update", "message": {"text": "x" * 120}, "i": i})
             settle()
 
         elif scenario == "planworker":

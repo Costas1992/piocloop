@@ -148,6 +148,11 @@ class PiClient:
         self._closing = False
 
         self.events: asyncio.Queue[dict] = asyncio.Queue()
+        # A completion signal is kept out-of-band from ``events``.  Consumers
+        # may legitimately lag while pi emits a large event stream; putting
+        # ``agent_settled`` behind thousands of queued activity records must
+        # not delay the next new_session command.
+        self.settled: asyncio.Event = asyncio.Event()
         self.exited: asyncio.Event = asyncio.Event()
         self.returncode: Optional[int] = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=stderr_tail)
@@ -195,8 +200,24 @@ class PiClient:
             asyncio.create_task(self._read_stderr(), name="pi-stderr"),
         ]
         try:
-            # Do not let callers race startup with the first session switch.
-            await self.request({"type": "get_state"}, timeout=readiness_timeout)
+            # Startup can spend a while loading extensions/model metadata.  A
+            # single long request is fragile (and made respawn readiness look
+            # dead); poll one request at a time within a bounded total window.
+            deadline = asyncio.get_running_loop().time() + readiness_timeout
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise PiTimeout(
+                        "pi RPC readiness deadline expired",
+                        diagnostics=self.diagnostics,
+                    )
+                try:
+                    await self.request({"type": "get_state"}, timeout=min(2.0, remaining))
+                    break
+                except PiTimeout:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise
+                    await asyncio.sleep(min(0.25, max(0.0, deadline - asyncio.get_running_loop().time())))
         except Exception:
             # request() attaches a diagnostic snapshot to PiTimeout.  Do not
             # replace it here: close() clears the live process handle.
@@ -297,6 +318,9 @@ class PiClient:
         elif mtype == "extension_ui_request":
             self._handle_ui_request(msg)
         else:
+            if mtype == "agent_settled":
+                self.settled.set()
+            self._emit(msg)
             self._emit(msg)
 
     async def _read_stderr(self) -> None:
@@ -484,6 +508,10 @@ class PiClient:
     # ------------------------------------------------------------------
 
     async def new_session(self, timeout: float = 30.0) -> dict:
+        # Clear before sending so a completion from the preceding session
+        # cannot satisfy the next iteration's wait.  The reader sets this
+        # directly, independently of the potentially backlogged event queue.
+        self.settled.clear()
         return await self.request({"type": "new_session"}, timeout=timeout)
 
     async def prompt(self, message: str, *, timeout: float = 60.0) -> dict:
@@ -491,6 +519,7 @@ class PiClient:
 
         Completion is signalled later by the `agent_settled` event.
         """
+        self.settled.clear()
         return await self.request({"type": "prompt", "message": message}, timeout=timeout)
 
     async def abort(self, timeout: float = 30.0) -> dict:

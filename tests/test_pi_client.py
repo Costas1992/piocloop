@@ -138,10 +138,19 @@ async def test_startup_timeout_includes_pipe_and_stderr_diagnostics():
     assert client.exited.is_set()
 
 
-async def test_start_waits_for_rpc_readiness_before_new_session():
-    """Startup must complete before the first session replacement is sent."""
-    async with PiClient(fake_argv("readiness")) as client:
+async def test_readiness_retries_a_transient_startup_timeout():
+    """A replacement child may miss the first probe while it finishes booting."""
+    async with PiClient(fake_argv("readiness_retry"), default_timeout=1.0) as client:
         assert await client.new_session() == {"cancelled": False}
+
+
+async def test_settled_signal_is_not_behind_a_backlogged_event_stream():
+    """Completion must remain usable even when activity events are unconsumed."""
+    async with PiClient(fake_argv("burst")) as client:
+        await client.prompt("emit a burst")
+        await asyncio.wait_for(client.settled.wait(), timeout=5.0)
+        # Do not drain client.events: new_session must still be able to proceed.
+        assert await client.new_session(timeout=2.0) == {"cancelled": False}
 
 
 async def test_concurrent_requests_are_correlated():

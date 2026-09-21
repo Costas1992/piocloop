@@ -383,7 +383,7 @@ class LoopEngine:
 
             try:
                 await asyncio.wait_for(
-                    self._settled.wait(),
+                    self.client.settled.wait(),
                     timeout=min(cfg.soft_poll_interval, remaining),
                 )
                 return
@@ -419,7 +419,7 @@ class LoopEngine:
         with contextlib.suppress(PiError, PiExited, PiTimeout):
             await self.client.abort(timeout=cfg.command_timeout)
         try:
-            await asyncio.wait_for(self._settled.wait(), timeout=cfg.abort_grace)
+            await asyncio.wait_for(self.client.settled.wait(), timeout=cfg.abort_grace)
             return
         except asyncio.TimeoutError:
             pass
