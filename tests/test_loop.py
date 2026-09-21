@@ -24,7 +24,7 @@ from piocloop.loop import (
     LoopConfig,
     LoopEngine,
 )
-from piocloop.pi_client import PiTimeout
+from piocloop.pi_client import PiClient, PiTimeout
 
 FAKE_PI = str(Path(__file__).parent / "fake_pi.py")
 
@@ -167,6 +167,37 @@ async def test_failed_respawn_readiness_is_a_controlled_retry_then_stop(workspac
     assert engine.state == STATE_ERROR
 
 
+
+
+async def test_each_iteration_uses_a_fresh_process_without_new_session(workspace):
+    """A settled event burst must never be followed by RPC new_session."""
+    clients: list[PiClient] = []
+
+    class NoSessionClient(PiClient):
+        async def new_session(self, *args, **kwargs):  # pragma: no cover - failure proves misuse
+            raise AssertionError("iteration attempted to reuse new_session")
+
+    def factory() -> PiClient:
+        client = NoSessionClient([sys.executable, FAKE_PI, "planworker"])
+        clients.append(client)
+        return client
+
+    config = make_config(workspace, "planworker")
+    ui = RecordingUI()
+    engine = LoopEngine(config, ui=ui, client_factory=factory)
+    assert await engine.boot()
+    task = asyncio.create_task(engine.run(auto_start=True))
+    try:
+        await asyncio.wait_for(task, timeout=30.0)
+    finally:
+        engine.request_stop()
+        await engine.shutdown()
+
+    assert engine.state == STATE_COMPLETE
+    # boot creates an initial readiness process; every iteration then gets a
+    # distinct replacement, including the marker-only final iteration.
+    assert len(clients) == engine.iteration + 1
+    assert all(client._proc is None for client in clients)
 
 
 async def test_plan_runs_to_completion(workspace):

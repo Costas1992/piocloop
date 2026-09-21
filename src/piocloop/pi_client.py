@@ -321,7 +321,6 @@ class PiClient:
             if mtype == "agent_settled":
                 self.settled.set()
             self._emit(msg)
-            self._emit(msg)
 
     async def _read_stderr(self) -> None:
         assert self._proc and self._proc.stderr

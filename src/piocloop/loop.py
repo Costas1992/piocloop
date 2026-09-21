@@ -291,8 +291,6 @@ class LoopEngine:
                     continue
 
                 try:
-                    if self.client is None:
-                        raise PiExited("pi client is unavailable")
                     await self._run_iteration()
                 except (PiError, PiExited, PiTimeout, OSError) as exc:
                     if self._stop_requested:
@@ -333,26 +331,30 @@ class LoopEngine:
         finally:
             self.ui.log_line("info", "Loop stopped")
 
+    async def _start_iteration_client(self) -> None:
+        """Give every iteration a clean Pi process/session boundary.
+
+        Pi's RPC server is deliberately long-lived, but its internal session
+        state and event backlog are not a safe boundary between model turns.
+        In particular, sending ``new_session`` after a large settled event
+        burst can leave the RPC reader alive while the command response is
+        never delivered.  Closing the old process also drops its pending RPCs
+        and event queue; ``start`` performs a fresh readiness handshake.
+        Normal rotation is not counted as a recovery respawn.
+        """
+        await self.shutdown()
+        self._mapper = EventMapper(self.config.plan_file)
+        await self._spawn_client()
+
     async def _run_iteration(self) -> None:
-        if self.client is None:
-            raise PiExited("pi client is unavailable")
+        try:
+            await self._start_iteration_client()
+        except (PiError, PiExited, OSError):
+            self.client = None
+            raise
         self._settled.clear()
         self._seen_agent_start = False
-
-        try:
-            await self.client.new_session()
-        except (PiTimeout, PiExited) as exc:
-            # A session-switch timeout is not a recoverable iteration error:
-            # pi can have accepted the switch while losing its response, so
-            # retrying on the same process is unsafe and used to produce the
-            # characteristic three consecutive ``new_session`` failures.
-            # Replace the process, with start() performing a readiness
-            # handshake before the next iteration reaches this point.
-            self.ui.log_line("warn", f"new_session failed; restarting pi: {exc}")
-            if self.respawns >= self.config.max_respawns:
-                raise
-            await self._respawn_client()
-            raise
+        assert self.client is not None
         self.iteration += 1
         self.iter_start_time = time.monotonic()
         self.ui.log_line("start", f"Iteration {self.iteration}")

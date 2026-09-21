@@ -10,9 +10,9 @@ the hangs documented in [`ANALYSIS.md`](ANALYSIS.md).
 
 ## How it works
 
-1. piocloop starts a `pi --mode rpc` subprocess
-2. On each iteration it starts a fresh session, sends your loop prompt (with the
-   plan file path injected), and waits for `agent_settled`
+1. piocloop starts a fresh `pi --mode rpc` subprocess for each iteration
+2. It sends your loop prompt (with the plan file path injected) and waits for
+   `agent_settled`
 3. PI reads the plan, executes the next task, marks it `[x]`, and appends
    `<plan-complete>` when everything is done
 4. The TUI shows live progress: task counter, progress bar, current task, token
@@ -121,6 +121,7 @@ See [`skills/README.md`](skills/README.md) for other harnesses and for pointing
 | Agent | OpenCode | PI |
 | Transport | HTTP + SSE on port 4096 | stdin/stdout JSONL |
 | "Iteration done" signal | `session.idle` SSE event | `agent_settled` RPC event |
+| Session boundary | persistent server session | fresh Pi child per iteration |
 | Idle fallback | polled a field that does not exist | polls `get_state().isStreaming` |
 | Iteration timeout | none | `--iteration-timeout`, then abort, then respawn |
 | Iteration cap | none | `--max-iterations` |
