@@ -183,7 +183,18 @@ class LoopEngine:
         self.ui.log_line("warn", f"Restarting pi (respawn {self.respawns}/{self.config.max_respawns})")
         await self.shutdown()
         self._mapper = EventMapper(self.config.plan_file)
-        await self._spawn_client()
+        try:
+            await self._spawn_client()
+        except (PiError, OSError) as exc:
+            # shutdown() deliberately clears self.client before starting the
+            # replacement.  If readiness fails, keep that invariant explicit
+            # and turn the failure into an iteration error rather than letting
+            # the next retry reach _run_iteration with no client.
+            self.client = None
+            self.ui.log_line("error", f"Could not restart pi: {exc}")
+            if isinstance(exc, PiError):
+                raise
+            raise PiError(f"Could not restart pi: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Events
@@ -274,6 +285,8 @@ class LoopEngine:
                     continue
 
                 try:
+                    if self.client is None:
+                        raise PiExited("pi client is unavailable")
                     await self._run_iteration()
                 except (PiError, PiExited, PiTimeout, OSError) as exc:
                     if self._stop_requested:
@@ -315,7 +328,8 @@ class LoopEngine:
             self.ui.log_line("info", "Loop stopped")
 
     async def _run_iteration(self) -> None:
-        assert self.client is not None
+        if self.client is None:
+            raise PiExited("pi client is unavailable")
         self._settled.clear()
         self._seen_agent_start = False
 
@@ -350,7 +364,8 @@ class LoopEngine:
 
     async def _await_settle(self) -> None:
         """Bounded wait for `agent_settled`. Cannot hang (DESIGN §4.2)."""
-        assert self.client is not None
+        if self.client is None:
+            raise PiExited("pi client is unavailable")
         cfg = self.config
         deadline = time.monotonic() + cfg.iteration_timeout
         idle_polls = 0

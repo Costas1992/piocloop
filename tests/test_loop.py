@@ -24,6 +24,7 @@ from piocloop.loop import (
     LoopConfig,
     LoopEngine,
 )
+from piocloop.pi_client import PiTimeout
 
 FAKE_PI = str(Path(__file__).parent / "fake_pi.py")
 
@@ -92,6 +93,26 @@ async def wait_for_state(engine: LoopEngine, states: set[str], timeout: float = 
     pytest.fail(f"engine stuck in {engine.state!r}, never reached {states}")
 
 
+class RespawnReadinessFailureClient:
+    """Minimal client sequence: first session fails, replacement never readies."""
+
+    def __init__(self, replacement: bool) -> None:
+        self.replacement = replacement
+        self.events: asyncio.Queue[dict] = asyncio.Queue()
+        self.exited = asyncio.Event()
+
+    async def start(self) -> None:
+        if self.replacement:
+            raise PiTimeout("no response to 'get_state' within deadline")
+
+    async def close(self) -> None:
+        self.exited.set()
+
+    async def new_session(self) -> dict:
+        raise PiTimeout("no response to 'new_session' within deadline")
+
+
+
 class EngineHarness:
     """Boot an engine, run it in the background, always clean it up."""
 
@@ -114,9 +135,38 @@ class EngineHarness:
         await self.engine.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Happy path
-# ---------------------------------------------------------------------------
+async def test_failed_respawn_readiness_is_a_controlled_retry_then_stop(workspace):
+    """A replacement that never becomes ready must not hit the client assert."""
+    created = 0
+
+    def factory() -> RespawnReadinessFailureClient:
+        nonlocal created
+        created += 1
+        return RespawnReadinessFailureClient(replacement=created > 1)
+
+    config = make_config(
+        workspace,
+        "normal",
+        max_respawns=1,
+        max_error_streak=2,
+        error_backoff_base=1.0,
+        max_stalls=0,
+    )
+    engine = LoopEngine(config, ui=RecordingUI(), client_factory=factory)
+    assert await engine.boot()
+    task = asyncio.create_task(engine.run(auto_start=True))
+    try:
+        await wait_for_state(engine, {STATE_ERROR}, timeout=5.0)
+        assert engine.client is None
+        assert engine.error_streak == 2
+    finally:
+        engine.request_stop()
+        await asyncio.wait_for(task, timeout=5.0)
+        await engine.shutdown()
+
+    assert engine.state == STATE_ERROR
+
+
 
 
 async def test_plan_runs_to_completion(workspace):
